@@ -9,7 +9,7 @@ Everything runs locally and costs nothing. No cloud services, no API keys. The L
 ## Progress
 
 - [x] Phase 1: synthetic data, 3-layer pipeline, chaos injector
-- [ ] Phase 2: diagnostic engine (snapshots and diffs per layer)
+- [x] Phase 2: diagnostic engine (snapshots and diffs per layer)
 - [ ] Phase 3: root-cause report via Ollama
 - [ ] Phase 4: Airflow DAG
 - [ ] Phase 5: Streamlit demo
@@ -59,6 +59,28 @@ I picked failures I've actually run into. None of them crash the job. The pipeli
 
 For every run, the injector writes down what it broke: the column, the segment and the row count. Later phases use that to check whether the diagnosis got it right.
 
+## Diagnostics
+
+After every run, the diagnostic engine profiles each table in each layer: row count, column types, null %, distinct counts, min/max/sum. It then runs these checks against a set of contracts (`diagnostics/contracts.py`):
+
+| Check | What it looks for |
+|---|---|
+| schema | column types that don't match the contract |
+| key_integrity | join keys that changed between raw and staging |
+| uniqueness | duplicate primary keys |
+| nulls | columns over their null limit |
+| row_counts | rows lost or gained that the business rules don't explain |
+| measures | total balance not reconciling from one layer to the next |
+| distribution | too many loans falling into the UNKNOWN risk band |
+
+Finding that something is wrong is the easy part. The hard part is working out which failure caused the others. A type change upstream shows up as nulls in staging and a short total in final, and every one of those checks fails. So the engine only reports a problem at the layer where it *first* appears, and marks later layers as `persists_in`. It then sorts the failures in pipeline order. The earliest one is the root cause and the rest are symptoms. When two failures start at the same step, the more specific one wins. A key change explains row loss, not the other way around.
+
+Each finding carries evidence you'd want before raising a ticket: which source system is affected, sample bad values, and a detected pattern where there is one ("leading zeros stripped", "currency symbols"). The WITHDRAWN drop in staging is reported as an expected change, not a failure.
+
+Because the chaos injector records what it actually broke, every diagnosis is checked against the answer. Right now it gets the right cause and the right location for all four scenarios, and it reports the clean run as healthy.
+
+Snapshots and reports are saved in `meta.layer_snapshots` and `meta.diagnostic_reports`.
+
 ## Running it
 
 You need Python 3.10 or newer.
@@ -84,22 +106,25 @@ python scripts/run_pipeline.py --scenario dropped_join_key   # break something
 pytest
 ```
 
-Output from the `dropped_join_key` run looks like this. Staging still has 4,859 loans, but final only has 3,378:
+Here's what the `dropped_join_key` run prints:
 
 ```
-Row counts per layer
-  raw      customers=2,000  loans=5,000
-  staging  customers=2,000  loans=4,859
-  final    loan_portfolio=3,378  portfolio_summary=4
+Diagnosis: FAILED
+  checks: schema=PASS  key_integrity=FAIL  uniqueness=PASS  nulls=PASS  row_counts=FAIL  measures=FAIL  distribution=PASS
+  expected: 141 loans are expected to drop out in staging: 141 WITHDRAWN (business rule) and 0 duplicate keys
 
-Loan vitals per layer
-  layer  loans  distinct_loans  total_balance  balance_not_numeric_pct balance_type
-    raw   5000            5000    208834220.0                      0.0       DOUBLE
-staging   4859            4859    208834220.0                      0.0       DOUBLE
-  final   3378            3378    199552474.0                      0.0       DOUBLE
+Root cause  [JOIN_KEY_MISMATCH] at raw->staging, staging.loans.customer_id
+  customer_id changed on 1,481 loans between raw and staging
+  affected_segment: source_system = 'CARD_PLATFORM'
+  pattern: leading zeros stripped - looks like the key was cast to an integer
+  examples: ["'00001839' -> '1839'", "'00000353' -> '353'", "'00001418' -> '1418'"]
 
-Chaos injected at staging:loans: Dropped join key (1,481 rows)
+Downstream symptoms
+  - [ROW_LOSS] staging->final: 1,481 rows lost during staging->final (-30.5%)
+  - [MEASURE_DRIFT] staging->final: total balance in final.loan_portfolio is short by $9,281,746 (-4.4%) vs the layer before
 ```
+
+Add `--json` to get the full structured report.
 
 The database ends up at `data/pipeline.duckdb` if you want to poke around in it.
 
@@ -118,6 +143,11 @@ src/pipeline_rca/
         staging.py        staging layer
         final.py          final layer
         runner.py         runs everything, logs the run
+    diagnostics/
+        contracts.py      expected schema, keys, null limits per table
+        snapshot.py       profiles every table in every layer
+        checks.py         the individual checks
+        engine.py         runs checks, picks root cause vs symptoms
 scripts/run_pipeline.py   CLI
 tests/                    pytest
 dags/                     Airflow (coming)
