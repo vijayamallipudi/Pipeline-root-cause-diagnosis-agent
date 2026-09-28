@@ -18,3 +18,9 @@ RAW = "raw"
 STAGING = "staging"
 FINAL = "final"
 META = "meta"
+
+# local LLM (ollama) - pull a model first, e.g. `ollama pull llama3.2`
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("RCA_OLLAMA_MODEL", "llama3.2")
+OLLAMA_TIMEOUT = int(os.getenv("RCA_OLLAMA_TIMEOUT", "300"))
+REPORTS_DIR = Path(os.getenv("RCA_REPORTS_DIR", DATA_DIR / "reports"))
