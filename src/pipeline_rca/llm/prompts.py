@@ -90,16 +90,13 @@ def _fmt(value) -> str:
     return str(value)
 
 
-def _segments(finding: Finding) -> str | None:
-    segs = finding.evidence.get("segments")
-    if not segs:
-        return None
-    parts = []
-    for s in segs[:4]:
-        name = s.get("source_system")
+def _segments(finding: Finding) -> list[str]:
+    """One line per source system - a single long line got cut off in the report UI."""
+    lines = []
+    for s in finding.evidence.get("segments", [])[:4]:
         rest = ", ".join(f"{k}={_fmt(v)}" for k, v in s.items() if k != "source_system")
-        parts.append(f"{name} ({rest})")
-    return "; ".join(parts)
+        lines.append(f"    {s.get('source_system')}: {rest}")
+    return lines
 
 
 def describe_finding(f: Finding) -> str:
@@ -113,7 +110,8 @@ def describe_finding(f: Finding) -> str:
             lines.append(f"  {key}: {_fmt(val)}")
     segs = _segments(f)
     if segs:
-        lines.append(f"  by source_system: {segs}")
+        lines.append("  by source_system:")
+        lines += segs
     return "\n".join(lines)
 
 
