@@ -10,7 +10,7 @@ Everything runs locally and costs nothing. No cloud services, no API keys. The L
 
 - [x] Phase 1: synthetic data, 3-layer pipeline, chaos injector
 - [x] Phase 2: diagnostic engine (snapshots and diffs per layer)
-- [ ] Phase 3: root-cause report via Ollama
+- [x] Phase 3: root-cause report via Ollama
 - [ ] Phase 4: Airflow DAG
 - [ ] Phase 5: Streamlit demo
 - [ ] Phase 6: architecture diagram and final docs
@@ -81,6 +81,21 @@ Because the chaos injector records what it actually broke, every diagnosis is ch
 
 Snapshots and reports are saved in `meta.layer_snapshots` and `meta.diagnostic_reports`.
 
+## AI root-cause report
+
+The last step turns the diagnosis into an incident note that someone who wasn't debugging the pipeline could read. It uses a local model through Ollama (`llama3.2` by default), so nothing leaves the machine and there's no API bill.
+
+I didn't want the model doing the investigating. Small models will happily make up a cause if you hand them a pile of JSON. So the diagnostic engine finds the answer, and the model only explains it:
+
+- The findings are flattened into short plain-text facts: root cause, symptoms, and the expected changes it shouldn't flag.
+- Fix suggestions come from a small playbook for each failure type, so the "recommended fix" section is based on what you'd actually do.
+- The ground truth from the chaos injector is never included in the prompt.
+- If the output doesn't mention the actual table and column that broke, it's thrown out and a template report is used instead. If it skips a section, that section gets filled from the template.
+- If Ollama isn't running, you still get the template report. The pipeline never fails because of the LLM.
+- Every report ends with the raw evidence from the checks, so you can verify what the model wrote.
+
+Reports go to `data/reports/<run_id>.md` and `meta.rca_reports`. On my laptop (CPU only), `llama3.2` takes about 1–2 minutes per report. A bigger model like `llama3.1:8b` writes better notes but is slower.
+
 ## Running it
 
 You need Python 3.10 or newer.
@@ -126,9 +141,21 @@ Downstream symptoms
 
 Add `--json` to get the full structured report.
 
+For the AI write-up, install [Ollama](https://ollama.com), pull a model and add `--explain`:
+
+```bash
+ollama pull llama3.2
+python scripts/run_pipeline.py --scenario type_change --explain
+python scripts/run_pipeline.py --scenario type_change --explain --model llama3.1:8b   # any model you have
+```
+
+`--json --explain` puts the report in the JSON output under `rca_report`.
+
+If you want to run this from cron or CI, `--fail-on-problem` makes the command exit with code 1 when diagnostics find something, so whatever is scheduling it can alert on it. It's off by default.
+
 The database ends up at `data/pipeline.duckdb` if you want to poke around in it.
 
-You can override a few settings with environment variables: `RCA_DB_PATH`, `RCA_SEED` (default 42), `RCA_N_CUSTOMERS` (2000) and `RCA_N_LOANS` (5000).
+You can override a few settings with environment variables: `RCA_DB_PATH`, `RCA_SEED` (default 42), `RCA_N_CUSTOMERS` (2000), `RCA_N_LOANS` (5000), `RCA_OLLAMA_MODEL` (llama3.2) and `OLLAMA_HOST` (http://localhost:11434).
 
 ## Repo layout
 
@@ -148,6 +175,10 @@ src/pipeline_rca/
         snapshot.py       profiles every table in every layer
         checks.py         the individual checks
         engine.py         runs checks, picks root cause vs symptoms
+    llm/
+        client.py         minimal ollama client (urllib, no extra deps)
+        prompts.py        facts + fix playbook -> prompt
+        report.py         writes the report, grounding check, template fallback
 scripts/run_pipeline.py   CLI
 tests/                    pytest
 dags/                     Airflow (coming)
@@ -156,4 +187,4 @@ app/                      Streamlit (coming)
 
 ## Stack
 
-Python, pandas, DuckDB, Faker and pytest so far. Ollama, Airflow and Streamlit come in the next phases.
+Python, pandas, DuckDB, Faker, Ollama and pytest so far. Airflow and Streamlit come in the next phases.

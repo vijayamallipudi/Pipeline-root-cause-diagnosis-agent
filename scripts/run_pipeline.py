@@ -3,7 +3,9 @@
     python scripts/run_pipeline.py                        # clean run
     python scripts/run_pipeline.py --scenario null_spike  # break something
     python scripts/run_pipeline.py --list                 # list scenarios
-    python scripts/run_pipeline.py --scenario type_change --json   # full diagnostic output
+    python scripts/run_pipeline.py --scenario type_change --json      # full diagnostic output
+    python scripts/run_pipeline.py --scenario type_change --explain   # + AI root-cause report (ollama)
+    python scripts/run_pipeline.py --fail-on-problem                  # exit 1 if a problem is found (for cron/CI)
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pipeline_rca import config  # noqa: E402
 from pipeline_rca.chaos import Scenario, list_scenarios  # noqa: E402
 from pipeline_rca.diagnostics import DiagnosticReport, diagnose  # noqa: E402
+from pipeline_rca.llm import generate_report  # noqa: E402
 from pipeline_rca.pipeline import run_pipeline  # noqa: E402
 
 
@@ -56,6 +59,10 @@ def main() -> int:
     parser.add_argument("--db", default=str(config.DB_PATH), help="DuckDB file path")
     parser.add_argument("--list", action="store_true", help="list chaos scenarios and exit")
     parser.add_argument("--json", action="store_true", help="print the full diagnostic report as JSON")
+    parser.add_argument("--explain", action="store_true", help="write a root-cause report with the local LLM")
+    parser.add_argument("--model", default=config.OLLAMA_MODEL, help="ollama model to use with --explain")
+    parser.add_argument("--fail-on-problem", action="store_true",
+                        help="exit with code 1 when diagnostics find a problem, so schedulers/CI can alert on it")
     args = parser.parse_args()
 
     if args.list:
@@ -67,16 +74,31 @@ def main() -> int:
     result = run_pipeline(scenario=args.scenario, db_path=args.db, seed=args.seed)
     report = diagnose(db_path=args.db, run_id=result.run_id)
 
+    exit_code = 1 if args.fail_on_problem and report.status != "HEALTHY" else 0
+
     if args.json:
-        print(json.dumps(report.to_dict(), indent=2, default=str))
-        return 0
+        out = report.to_dict()
+        if args.explain:
+            rca = generate_report(report, db_path=args.db, model=args.model)
+            out["rca_report"] = {"source": rca.source, "model": rca.model, "note": rca.note,
+                                 "path": str(rca.path) if rca.path else None, "markdown": rca.markdown}
+        print(json.dumps(out, indent=2, default=str))
+        return exit_code
 
     print(f"\nRun {result.run_id}  scenario={result.scenario}")
     print("Row counts")
     for layer, tables in result.row_counts.items():
         print(f"  {layer:<8} " + "  ".join(f"{t}={n:,}" for t, n in tables.items()))
     print_report(report)
-    return 0
+
+    if args.explain:
+        print(f"\nWriting root-cause report with {args.model} (this can take a minute or two on CPU)...")
+        rca = generate_report(report, db_path=args.db, model=args.model)
+        print(f"[{rca.source}{', ' + str(rca.seconds) + 's' if rca.seconds else ''}] {rca.note}".rstrip())
+        print("\n" + rca.markdown)
+        if rca.path:
+            print(f"\nSaved to {rca.path}")
+    return exit_code
 
 
 if __name__ == "__main__":
