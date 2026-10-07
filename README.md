@@ -11,7 +11,7 @@ Everything runs locally and costs nothing. No cloud services, no API keys. The L
 - [x] Phase 1: synthetic data, 3-layer pipeline, chaos injector
 - [x] Phase 2: diagnostic engine (snapshots and diffs per layer)
 - [x] Phase 3: root-cause report via Ollama
-- [ ] Phase 4: Airflow DAG
+- [x] Phase 4: Airflow DAG
 - [ ] Phase 5: Streamlit demo
 - [ ] Phase 6: architecture diagram and final docs
 
@@ -96,6 +96,41 @@ I didn't want the model doing the investigating. Small models will happily make 
 
 Reports go to `data/reports/<run_id>.md` and `meta.rca_reports`. On my laptop (CPU only), `llama3.2` takes about 1–2 minutes per report. A bigger model like `llama3.1:8b` writes better notes but is slower.
 
+## Airflow
+
+The DAG in `dags/pipeline_rca_dag.py` runs the whole thing as separate tasks:
+
+```
+start_run -> extract_to_raw -> transform_staging -> build_final
+          -> run_diagnostics -> generate_rca_report -> quality_gate
+```
+
+You trigger it with a `scenario` param (`none` for a clean run) and optionally a `model` for the report.
+
+Some decisions that went into it:
+
+- **The DAG file is thin.** Each task calls a plain function in `pipeline_rca/tasks.py`, so all the logic can be run and tested without Airflow. The tests in `tests/test_tasks.py` call those functions in DAG order, passing only the `run_id` between them like XCom would.
+- **No shared memory between tasks.** Each task runs in its own process, so all run state (scenario, row counts, what chaos was injected) lives in `meta.pipeline_runs`. I had to refactor the runner for this. Originally it kept that state in memory for the whole run.
+- **The quality gate runs last, after the report.** When a run fails, the DAG still goes red, but the incident report is already written. I'd rather have the explanation waiting than a failed task and nothing else.
+- **`max_active_runs=1`**, because DuckDB only allows one writer at a time.
+- **Every layer remembers which run wrote it.** Splitting the stages into tasks exposed a bug: staging for a new run could quietly clean the *previous* run's raw data if its own extract hadn't run. Now a stage refuses to read another run's layer and says what to run first.
+- **Retries are set per task.** Pipeline stages retry once, which is safe because a stage can re-run for the same run. The report task gets a time limit longer than Ollama's own timeout, so a slow model falls back to the template instead of being killed first. The quality gate never retries, because bad data doesn't fix itself and retrying would only delay the alert.
+
+`scripts/airflow_setup.sh` installs Airflow in its own venv with the pinned constraints file and points it at this repo's `dags/` folder. It runs on Linux, Mac, or WSL on Windows:
+
+```bash
+bash scripts/airflow_setup.sh          # one-time install
+bash scripts/airflow_setup.sh start    # then open http://localhost:8080
+```
+
+**How it's tested.** I couldn't run Airflow on my own laptop. Airflow doesn't run natively on Windows, and installing WSL needs admin rights I don't have on that machine. So:
+
+- the task logic is plain Python in `tasks.py`, and the tests run it in DAG order
+- the DAG file itself is loaded in the tests against a small stand-in for `airflow.sdk`, which checks task order, retry settings and params. I broke a dependency on purpose to make sure that test catches it.
+- the next step is CI on a Linux runner that runs the DAG with real Airflow
+
+If Ollama runs on Windows, set `networkingMode=mirrored` in `%UserProfile%\.wslconfig` so WSL can reach it on localhost. If Airflow can't reach Ollama, the reports fall back to the template.
+
 ## Running it
 
 You need Python 3.10 or newer.
@@ -179,12 +214,14 @@ src/pipeline_rca/
         client.py         minimal ollama client (urllib, no extra deps)
         prompts.py        facts + fix playbook -> prompt
         report.py         writes the report, grounding check, template fallback
+    tasks.py              one function per airflow task
 scripts/run_pipeline.py   CLI
+scripts/airflow_setup.sh  airflow install + start (Linux/Mac/WSL)
 tests/                    pytest
-dags/                     Airflow (coming)
+dags/pipeline_rca_dag.py  Airflow DAG
 app/                      Streamlit (coming)
 ```
 
 ## Stack
 
-Python, pandas, DuckDB, Faker, Ollama and pytest so far. Airflow and Streamlit come in the next phases.
+Python, pandas, DuckDB, Faker, Ollama, Airflow and pytest so far. Streamlit comes next.
