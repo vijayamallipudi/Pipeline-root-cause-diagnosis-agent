@@ -171,3 +171,26 @@ def diagnose(db_path=None, run_id: str | None = None, save: bool = True) -> Diag
                  root.category if root else None, json.dumps(report.to_dict(), default=str)],
             )
     return report
+
+
+def load_report(run_id: str, db_path=None) -> DiagnosticReport:
+    """Rebuild a saved report - lets a later task pick up where diagnose() left off."""
+    with connect(db_path) as con:
+        row = con.execute(
+            f"SELECT report FROM {config.META}.diagnostic_reports WHERE run_id = ?", [run_id]
+        ).fetchone()
+    if row is None:
+        raise KeyError(f"no diagnostic report saved for run {run_id}")
+    d = json.loads(row[0])
+    as_finding = lambda f: Finding(**f)  # noqa: E731
+    return DiagnosticReport(
+        run_id=d["run_id"],
+        status=d["status"],
+        root_cause=as_finding(d["root_cause"]) if d["root_cause"] else None,
+        symptoms=[as_finding(f) for f in d["symptoms"]],
+        expected_changes=[as_finding(f) for f in d["expected_changes"]],
+        checks=d["checks"],
+        layers=d["layers"],
+        impact=d["impact"],
+        evaluation=d.get("evaluation", {}),
+    )
