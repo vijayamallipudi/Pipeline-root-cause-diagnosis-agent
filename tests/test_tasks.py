@@ -98,7 +98,16 @@ class _Node:
         return other
 
 
+# names airflow puts in the task context - a task can't take one of these as a
+# normal argument (real airflow raises "... is a part of kwargs and therefore reserved")
+AIRFLOW_CONTEXT_KEYS = {
+    "run_id", "dag_run", "ti", "task_instance", "dag", "task", "ds", "ds_nodash", "ts",
+    "logical_date", "data_interval_start", "data_interval_end", "conf", "macros", "var", "params",
+}
+
+
 def _fake_airflow():
+    import inspect
     import types
 
     nodes = []
@@ -106,6 +115,10 @@ def _fake_airflow():
     def task(fn=None, **settings):
         def wrap(f):
             def make(*args, **kwargs):
+                passed = list(inspect.signature(f).parameters)[:len(args)]
+                for name in passed:
+                    if name in AIRFLOW_CONTEXT_KEYS:
+                        raise ValueError(f"The key {name!r} in args is a part of kwargs and therefore reserved.")
                 node = _Node(f.__name__, settings, args)
                 nodes.append(node)
                 return node

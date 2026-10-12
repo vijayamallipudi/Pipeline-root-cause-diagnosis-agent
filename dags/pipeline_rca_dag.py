@@ -61,36 +61,38 @@ def pipeline_root_cause_diagnosis():
     def start_run(params=None) -> str:
         return tasks.start(params["scenario"])
 
+    # our own id for the run is passed as pipeline_run_id - "run_id" is reserved by
+    # airflow for the dag run's id and can't be used as a task argument
     @task
-    def extract_to_raw(run_id: str) -> dict:
-        return tasks.extract(run_id)
+    def extract_to_raw(pipeline_run_id: str) -> dict:
+        return tasks.extract(pipeline_run_id)
 
     @task
-    def transform_staging(run_id: str) -> dict:
-        return tasks.staging(run_id)
+    def transform_staging(pipeline_run_id: str) -> dict:
+        return tasks.staging(pipeline_run_id)
 
     @task
-    def build_final(run_id: str) -> dict:
-        return tasks.final(run_id)
+    def build_final(pipeline_run_id: str) -> dict:
+        return tasks.final(pipeline_run_id)
 
     @task
-    def run_diagnostics(run_id: str) -> dict:
-        return tasks.diagnostics(run_id)
+    def run_diagnostics(pipeline_run_id: str) -> dict:
+        return tasks.diagnostics(pipeline_run_id)
 
     @task(execution_timeout=REPORT_TIMEOUT)
-    def generate_rca_report(run_id: str, params=None) -> dict:
-        return tasks.rca_report(run_id, model=params["model"])
+    def generate_rca_report(pipeline_run_id: str, params=None) -> dict:
+        return tasks.rca_report(pipeline_run_id, model=params["model"])
 
     @task(retries=0)
     def quality_gate(summary: dict) -> str:
         return tasks.quality_gate(summary)
 
-    run_id = start_run()
-    raw = extract_to_raw(run_id)
-    stg = transform_staging(run_id)
-    fin = build_final(run_id)
-    diag = run_diagnostics(run_id)
-    report = generate_rca_report(run_id)
+    pipeline_run_id = start_run()
+    raw = extract_to_raw(pipeline_run_id)
+    stg = transform_staging(pipeline_run_id)
+    fin = build_final(pipeline_run_id)
+    diag = run_diagnostics(pipeline_run_id)
+    report = generate_rca_report(pipeline_run_id)
     gate = quality_gate(diag)
 
     raw >> stg >> fin >> diag >> report >> gate
