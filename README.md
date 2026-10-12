@@ -1,5 +1,7 @@
 # Pipeline Root-Cause Diagnosis Agent
 
+[![CI](https://github.com/vijayamallipudi/Pipeline-root-cause-diagnosis-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/vijayamallipudi/Pipeline-root-cause-diagnosis-agent/actions/workflows/ci.yml)
+
 A lot of my time as a data engineer goes into answering one question: "why doesn't this number match?" Usually the answer is buried somewhere between the source extract and the final table. A column changed type upstream, a join started dropping rows, a load ran twice. Finding it means going layer by layer and comparing row counts, schemas and totals until something doesn't line up.
 
 This project automates that process. It runs a small loan pipeline (raw -> staging -> final) in DuckDB, breaks it on purpose, and then traces where things went wrong. A local LLM then writes up the root cause in plain English.

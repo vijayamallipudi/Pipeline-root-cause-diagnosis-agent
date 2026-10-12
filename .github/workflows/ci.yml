@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+      - name: Tests
+        run: pytest -q
+
+  # airflow doesn't run on Windows, so this is where the DAG gets run for real
+  airflow:
+    runs-on: ubuntu-latest
+    env:
+      AIRFLOW_VERSION: "3.3.2"
+      AIRFLOW_HOME: ${{ github.workspace }}/.airflow
+      AIRFLOW__CORE__DAGS_FOLDER: ${{ github.workspace }}/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Airflow (pinned constraints) and the project
+        run: |
+          pip install "apache-airflow==${AIRFLOW_VERSION}" \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-3.12.txt"
+          pip install -e . pytest
+      - name: Set up the Airflow metadata db
+        run: airflow db migrate
+      - name: DAG imports cleanly
+        run: |
+          airflow dags list-import-errors
+          airflow dags list | grep pipeline_root_cause_diagnosis
+      - name: DAG file loads with real Airflow (the test that's skipped on Windows)
+        run: pytest -q tests/test_tasks.py -k dag_file_loads
+      - name: Healthy run passes the quality gate
+        run: |
+          airflow dags test pipeline_root_cause_diagnosis --conf '{"scenario": "none"}' 2>&1 | tee healthy.log || true
+          python scripts/check_airflow_run.py healthy.log none
+      - name: Broken run writes the report, then fails the quality gate
+        run: |
+          airflow dags test pipeline_root_cause_diagnosis --conf '{"scenario": "dropped_join_key"}' 2>&1 | tee broken.log || true
+          python scripts/check_airflow_run.py broken.log dropped_join_key
+      - name: Keep the logs and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: airflow-run
+          path: |
+            *.log
+            data/reports/*.md
