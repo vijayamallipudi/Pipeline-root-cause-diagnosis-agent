@@ -10,14 +10,36 @@ Everything runs locally and costs nothing. No cloud services, no API keys. The L
 
 ![Demo app showing a dropped join key: the root cause is flagged at raw -> staging and 1,481 loans go missing in final](docs/images/app-dropped-join-key.png)
 
-## Progress
+## How it fits together
 
-- [x] Phase 1: synthetic data, 3-layer pipeline, chaos injector
-- [x] Phase 2: diagnostic engine (snapshots and diffs per layer)
-- [x] Phase 3: root-cause report via Ollama
-- [x] Phase 4: Airflow DAG
-- [x] Phase 5: Streamlit demo
-- [ ] Phase 6: architecture diagram and final docs
+```mermaid
+flowchart TB
+    WAYS["Run it from the CLI, an Airflow DAG or the Streamlit app"]
+    SRC["Source systems<br/>fake customers + loans"]
+    CHAOS{{"Chaos injector<br/>breaks one thing on purpose"}}
+
+    subgraph db["DuckDB file"]
+        direction LR
+        RAW[("raw<br/>as delivered")] --> STG[("staging<br/>cleaned in pandas")] --> FIN[("final<br/>joined in SQL")]
+    end
+
+    DIAG["Diagnostic engine<br/>contracts, snapshots, 7 checks<br/>root cause vs symptoms"]
+    LLM["Ollama, local model<br/>explains the diagnosis<br/>grounding check + fallback"]
+    GATE{"Quality gate<br/>fails the run if<br/>anything was found"}
+    META[("meta<br/>runs, snapshots, reports")]
+
+    WAYS --> SRC --> RAW
+    CHAOS -. "source to raw<br/>or raw to staging" .-> db
+    db --> DIAG --> LLM --> GATE
+    DIAG --> META
+    LLM --> META
+```
+
+1. Fake source data lands in **raw**, gets cleaned into **staging** and joined into **final**. The chaos injector can break it on the way in or during cleaning.
+2. The **diagnostic engine** profiles every layer, checks it against contracts, and works out which failure came first. That one is the root cause, and everything after it is a symptom.
+3. A **local LLM** turns that into an incident note. It only explains what the checks proved, and it gets thrown out if it doesn't name the real table and column.
+4. The **quality gate** fails the run if anything was found. It goes last, so the write-up is already there when the run turns red.
+5. Everything is recorded in **meta**, so the CLI, the Airflow tasks and the Streamlit app all read the same history.
 
 ## How the pipeline works
 
@@ -61,7 +83,7 @@ I picked failures I've actually run into. None of them crash the job. The pipeli
 
 **`duplicate_rows`**: a retried load isn't idempotent and re-appends the last 12 months of loans. That gives 630 duplicate loan IDs and inflates balances by about $27M.
 
-For every run, the injector writes down what it broke: the column, the segment and the row count. Later phases use that to check whether the diagnosis got it right.
+For every run, the injector writes down what it broke: the column, the segment and the row count. The diagnosis never sees that. It's only used afterwards to score whether the diagnosis got it right.
 
 ## Diagnostics
 
@@ -113,7 +135,7 @@ You trigger it with a `scenario` param (`none` for a clean run) and optionally a
 
 Some decisions that went into it:
 
-- **The DAG file is thin.** Each task calls a plain function in `pipeline_rca/tasks.py`, so all the logic can be run and tested without Airflow. The tests in `tests/test_tasks.py` call those functions in DAG order, passing only the `run_id` between them like XCom would.
+- **The DAG file is thin.** Each task calls a plain function in `pipeline_rca/tasks.py`, so all the logic can be run and tested without Airflow. The tests in `tests/test_tasks.py` call those functions in DAG order, passing only the pipeline's run id between them like XCom would.
 - **No shared memory between tasks.** Each task runs in its own process, so all run state (scenario, row counts, what chaos was injected) lives in `meta.pipeline_runs`. I had to refactor the runner for this. Originally it kept that state in memory for the whole run.
 - **The quality gate runs last, after the report.** When a run fails, the DAG still goes red, but the incident report is already written. I'd rather have the explanation waiting than a failed task and nothing else.
 - **`max_active_runs=1`**, because DuckDB only allows one writer at a time.
@@ -127,11 +149,13 @@ bash scripts/airflow_setup.sh          # one-time install
 bash scripts/airflow_setup.sh start    # then open http://localhost:8080
 ```
 
-**How it's tested.** I couldn't run Airflow on my own laptop. Airflow doesn't run natively on Windows, and installing WSL needs admin rights I don't have on that machine. So:
+**How it's tested.** I couldn't run Airflow on my own laptop. Airflow doesn't run natively on Windows, and installing WSL needs admin rights I don't have on that machine. So it gets checked in three places:
 
 - the task logic is plain Python in `tasks.py`, and the tests run it in DAG order
-- the DAG file itself is loaded in the tests against a small stand-in for `airflow.sdk`, which checks task order, retry settings and params. I broke a dependency on purpose to make sure that test catches it.
-- the next step is CI on a Linux runner that runs the DAG with real Airflow
+- the DAG file is loaded in the tests against a small stand-in for `airflow.sdk`, which checks task order, retry settings, params and reserved argument names. I broke a dependency on purpose to make sure it catches that.
+- **CI runs the DAG with real Airflow** (3.3.2 on Linux) on every push, using `airflow dags test`. A healthy run has to pass the quality gate. A `dropped_join_key` run has to write its report and then fail the gate. `scripts/check_airflow_run.py` decides pass or fail from what the run left in DuckDB, not from log output.
+
+The real-Airflow job was worth it. It failed twice before going green, and both times on something the local stand-in didn't know about. First, Airflow 3 lists DAGs from its metadata db, so they have to be parsed (`airflow dags reserialize`) before `airflow dags list` sees them. Second, `run_id` is a reserved name in the task context, so a task can't take an argument called that. The DAG now passes `pipeline_run_id`, and the stand-in rejects reserved names the same way real Airflow does.
 
 If Ollama runs on Windows, set `networkingMode=mirrored` in `%UserProfile%\.wslconfig` so WSL can reach it on localhost. If Airflow can't reach Ollama, the reports fall back to the template.
 
@@ -191,6 +215,8 @@ python scripts/run_pipeline.py --scenario dropped_join_key   # break something
 pytest
 ```
 
+Every push runs the tests and the real-Airflow DAG check on GitHub Actions (`.github/workflows/ci.yml`). That's the badge at the top.
+
 Here's what the `dropped_join_key` run prints:
 
 ```
@@ -227,34 +253,47 @@ The database ends up at `data/pipeline.duckdb` if you want to poke around in it.
 
 You can override a few settings with environment variables: `RCA_DB_PATH`, `RCA_SEED` (default 42), `RCA_N_CUSTOMERS` (2000), `RCA_N_LOANS` (5000), `RCA_OLLAMA_MODEL` (llama3.2) and `OLLAMA_HOST` (http://localhost:11434).
 
+## What I'd do next
+
+This is a demo, so some things are simpler than they'd be in production. If I kept going:
+
+- **Real data and more failure types.** Late-arriving data, timezone shifts and partial loads are the next ones I'd add. They're common in practice and harder to catch than the four here.
+- **Learned baselines instead of fixed limits.** The contracts use hand-set thresholds, like at most 1% nulls. A real version would compare against the last N healthy runs, so a slow drift gets caught too.
+- **Alerting.** The quality gate fails the run, but nobody gets told. Posting the report to Slack or Teams on failure is a small step from here.
+- **A warehouse instead of a DuckDB file.** One file with one writer at a time is fine for a demo. On Snowflake or Databricks the checks would be the same SQL against real schemas.
+- **A bigger model.** `llama3.2` (3B) is fast on a laptop but occasionally clumsy. The guardrails catch the worst of it. An 8B model writes noticeably better notes if the hardware allows.
+
 ## Repo layout
 
 ```
 src/pipeline_rca/
-    config.py             settings
-    data_generator.py     fake customers and loans
-    chaos.py              failure scenarios
-    db.py                 duckdb helpers
+    config.py                 settings
+    data_generator.py         fake customers and loans
+    chaos.py                  failure scenarios
+    db.py                     duckdb helpers
     pipeline/
-        extract.py        raw layer
-        staging.py        staging layer
-        final.py          final layer
-        runner.py         runs everything, logs the run
+        extract.py            raw layer
+        staging.py            staging layer
+        final.py              final layer
+        runner.py             runs stages, tracks which run owns each layer
     diagnostics/
-        contracts.py      expected schema, keys, null limits per table
-        snapshot.py       profiles every table in every layer
-        checks.py         the individual checks
-        engine.py         runs checks, picks root cause vs symptoms
+        contracts.py          expected schema, keys, null limits per table
+        snapshot.py           profiles every table in every layer
+        checks.py             the individual checks
+        engine.py             runs checks, picks root cause vs symptoms
     llm/
-        client.py         minimal ollama client (urllib, no extra deps)
-        prompts.py        facts + fix playbook -> prompt
-        report.py         writes the report, grounding check, template fallback
-    tasks.py              one function per airflow task
-scripts/run_pipeline.py   CLI
-scripts/airflow_setup.sh  airflow install + start (Linux/Mac/WSL)
-tests/                    pytest
-dags/pipeline_rca_dag.py  Airflow DAG
-app/streamlit_app.py      demo UI
+        client.py             minimal ollama client (urllib, no extra deps)
+        prompts.py            facts + fix playbook -> prompt
+        report.py             writes the report, grounding check, template fallback
+    tasks.py                  one function per airflow task
+dags/pipeline_rca_dag.py      Airflow DAG
+app/streamlit_app.py          demo UI
+scripts/run_pipeline.py       CLI
+scripts/airflow_setup.sh      airflow install + start (Linux/Mac/WSL)
+scripts/check_airflow_run.py  CI check for airflow dags test runs
+.github/workflows/ci.yml      tests + real Airflow run on every push
+tests/                        pytest
+docs/images/                  screenshots
 ```
 
 ## Stack
