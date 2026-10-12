@@ -9,8 +9,8 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -30,8 +30,8 @@ jobs:
       AIRFLOW__CORE__DAGS_FOLDER: ${{ github.workspace }}/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -41,13 +41,17 @@ jobs:
             --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-3.12.txt"
           pip install -e . pytest
       - name: Set up the Airflow metadata db
-        run: airflow db migrate
-      - name: DAG imports cleanly
-        run: |
-          airflow dags list-import-errors
-          airflow dags list | grep pipeline_root_cause_diagnosis
+        run: airflow db migrate 2>&1 | tee db.log
       - name: DAG file loads with real Airflow (the test that's skipped on Windows)
-        run: pytest -q tests/test_tasks.py -k dag_file_loads
+        run: pytest -q tests/test_tasks.py -k dag_file_loads 2>&1 | tee dag_load.log
+      - name: DAG parses with no import errors
+        # airflow 3 lists dags from the metadata db, which only has them once
+        # they're parsed - there's no dag processor running here, so do it directly
+        run: |
+          airflow dags reserialize 2>&1 | tee reserialize.log
+          airflow dags list-import-errors 2>&1 | tee import_errors.log
+          airflow dags list 2>&1 | tee dags_list.log
+          grep -q pipeline_root_cause_diagnosis dags_list.log
       - name: Healthy run passes the quality gate
         run: |
           airflow dags test pipeline_root_cause_diagnosis --conf '{"scenario": "none"}' 2>&1 | tee healthy.log || true
@@ -56,11 +60,21 @@ jobs:
         run: |
           airflow dags test pipeline_root_cause_diagnosis --conf '{"scenario": "dropped_join_key"}' 2>&1 | tee broken.log || true
           python scripts/check_airflow_run.py broken.log dropped_join_key
+      - name: Show the end of each log on failure
+        # job logs need a GitHub login to read; annotations show on the run page for anyone
+        if: failure()
+        run: |
+          for f in *.log; do
+            [ -s "$f" ] || continue
+            msg=$(tail -n 40 "$f" | sed -e 's/%/%25/g' -e 's/\r//g' | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=${f}::${msg}"
+          done
       - name: Keep the logs and reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: airflow-run
+          if-no-files-found: ignore
           path: |
             *.log
             data/reports/*.md
