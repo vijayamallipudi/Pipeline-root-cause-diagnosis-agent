@@ -3,3 +3,5 @@ faker>=30
 pandas>=2.2
 numpy>=1.26
 pytest>=8
+streamlit>=1.40
+altair>=5
