@@ -113,3 +113,15 @@ def test_busy_database_shows_a_message_not_a_crash(app, tmp_path):
 
     at = at.run()  # once it's free the page works again
     assert not any("database is busy" in w.value for w in at.warning)
+
+
+def test_data_tab_switches_between_balance_and_loan_count(app):
+    at = run_scenario(app, "duplicate_rows")
+    show = next(r for r in at.radio if r.label == "Show")
+    assert show.value == "Balance"
+    show.set_value("Loan count").run()
+    assert not at.exception
+    table = at.dataframe[0].value
+    # the re-appended batch shows up as extra loans in staging and final
+    assert table["staging"].sum() == 5489
+    assert table["staging"].sum() > table["raw"].sum() - 141

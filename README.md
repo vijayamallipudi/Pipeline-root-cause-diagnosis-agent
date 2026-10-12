@@ -6,13 +6,15 @@ This project automates that process. It runs a small loan pipeline (raw -> stagi
 
 Everything runs locally and costs nothing. No cloud services, no API keys. The LLM part uses Ollama.
 
+![Demo app showing a dropped join key: the root cause is flagged at raw -> staging and 1,481 loans go missing in final](docs/images/app-dropped-join-key.png)
+
 ## Progress
 
 - [x] Phase 1: synthetic data, 3-layer pipeline, chaos injector
 - [x] Phase 2: diagnostic engine (snapshots and diffs per layer)
 - [x] Phase 3: root-cause report via Ollama
 - [x] Phase 4: Airflow DAG
-- [ ] Phase 5: Streamlit demo
+- [x] Phase 5: Streamlit demo
 - [ ] Phase 6: architecture diagram and final docs
 
 ## How the pipeline works
@@ -131,6 +133,37 @@ bash scripts/airflow_setup.sh start    # then open http://localhost:8080
 
 If Ollama runs on Windows, set `networkingMode=mirrored` in `%UserProfile%\.wslconfig` so WSL can reach it on localhost. If Airflow can't reach Ollama, the reports fall back to the template.
 
+## Demo app
+
+There's a small Streamlit app for showing this to people who don't want to read terminal output.
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+You pick a failure from the sidebar and click **Run pipeline**. You'll see:
+
+- **The pipeline flow**: loan counts and balances for raw, staging and final. Each arrow shows green (ok), orange (symptom) or red (root cause), so you can see where it broke at a glance.
+- **All 7 checks** with pass/fail. Hover any of them for what it looks for.
+- **AI report**: the incident note streams in as the local model writes it, and you can download it as markdown.
+- **Diagnosis**: the root cause, its evidence, the downstream symptoms, and the changes that were expected.
+- **Data**: a chart per source system across the layers, switchable between balance and loan count. Money hides some problems (all the card loans together are small next to the mortgages) and counts hide others (a type change keeps every row), so it shows both. You can also browse any table next to its column profile.
+- **Answer key**: what the chaos injector actually broke, next to what the diagnosis found.
+
+The AI report for the same run:
+
+![AI incident report: summary, where it broke and root cause, written by llama3.2](docs/images/ai-report-dropped-join-key.png)
+
+![Recommended fix and the raw evidence the report is checked against](docs/images/ai-report-fix-and-evidence.png)
+
+And the Data tab, where the orange CARD_PLATFORM bar is gone in final:
+
+![Balance by source system per layer; CARD_PLATFORM disappears in the final layer](docs/images/data-tab-balance-chart.png)
+
+Past runs stay in the sidebar, so you can flip between scenarios without re-running them. If Ollama isn't running, the app uses the template report instead. If the CLI or an Airflow task is using the database at the same moment, the app says the database is busy rather than crashing, because DuckDB only lets one program use the file at a time.
+
+The red banner was confusing at first. It reads as if the app itself broke. So there's a short "New here?" guide at the top that explains red means the checker *caught* something.
+
 ## Running it
 
 You need Python 3.10 or newer.
@@ -219,9 +252,9 @@ scripts/run_pipeline.py   CLI
 scripts/airflow_setup.sh  airflow install + start (Linux/Mac/WSL)
 tests/                    pytest
 dags/pipeline_rca_dag.py  Airflow DAG
-app/                      Streamlit (coming)
+app/streamlit_app.py      demo UI
 ```
 
 ## Stack
 
-Python, pandas, DuckDB, Faker, Ollama, Airflow and pytest so far. Streamlit comes next.
+Python, pandas, DuckDB, SQL, Faker, Ollama, Airflow, Streamlit, Altair and pytest. Everything is free and runs locally.

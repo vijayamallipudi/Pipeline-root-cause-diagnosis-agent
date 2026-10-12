@@ -272,16 +272,28 @@ def render_data(run_id: str) -> None:
         return
     df["balance_m"] = df["balance"] / 1e6
 
-    st.markdown("#### Outstanding balance by source system, per layer")
-    st.caption("Only balances readable as numbers are counted. A bar that shrinks or grows between "
-               "layers is where money went missing or got double counted.")
+    # money hides some problems (a dropped card loan is small next to a mortgage),
+    # counts hide others (a type change keeps every row) - so offer both
+    measure = st.radio("Show", ["Balance", "Loan count"], horizontal=True)
+    if measure == "Loan count":
+        field, axis_title, fmt = "loans", "Loans", "{:,.0f}"
+        st.markdown("#### Loans by source system, per layer")
+        st.caption("A bar that shrinks between layers is where loans went missing; one that grows is where "
+                   "they got duplicated. Staging is a little lower than raw on every run - that's the "
+                   "WITHDRAWN filter, which is expected.")
+    else:
+        field, axis_title, fmt = "balance_m", "Balance ($M)", "${:,.0f}"
+        st.markdown("#### Outstanding balance by source system, per layer")
+        st.caption("Only balances readable as numbers are counted. A bar that shrinks or grows between "
+                   "layers is where money went missing or got double counted.")
+
     chart = (
         alt.Chart(df)
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
             x=alt.X("layer:N", sort=LAYERS, title=None, axis=alt.Axis(labelAngle=0)),
             xOffset=alt.XOffset("source_system:N", sort=SOURCES, scale=alt.Scale(paddingInner=0.08)),
-            y=alt.Y("balance_m:Q", title="Balance ($M)", axis=alt.Axis(gridOpacity=0.35, domain=False)),
+            y=alt.Y(f"{field}:Q", title=axis_title, axis=alt.Axis(gridOpacity=0.35, domain=False)),
             color=alt.Color("source_system:N", title="Source system",
                             scale=alt.Scale(domain=SOURCES, range=SOURCE_COLORS[theme()]),
                             legend=alt.Legend(orient="top")),
@@ -297,8 +309,9 @@ def render_data(run_id: str) -> None:
     )
     st.altair_chart(chart, width="stretch")
     with st.expander("Show as table"):
-        table = df.pivot(index="source_system", columns="layer", values="balance")[LAYERS].reindex(SOURCES)
-        st.dataframe(table.style.format("${:,.0f}"), width="stretch")
+        value = "loans" if measure == "Loan count" else "balance"
+        table = df.pivot(index="source_system", columns="layer", values=value)[LAYERS].reindex(SOURCES)
+        st.dataframe(table.style.format(fmt), width="stretch")
 
     st.markdown("#### Browse a table")
     snaps = snapshots(run_id)
